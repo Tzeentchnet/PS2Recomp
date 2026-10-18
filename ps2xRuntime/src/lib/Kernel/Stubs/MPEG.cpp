@@ -622,6 +622,7 @@ namespace ps2_stubs
         constexpr uint8_t kMpegPrivateStream1 = 0xBDu;
         constexpr size_t kStartCodeNotFound = std::numeric_limits<size_t>::max();
         constexpr uint32_t kMpegCallbackDataSize = 0x20u;
+        constexpr size_t kMpegNodataPrefetchPictures = 4u;
 
         uint64_t mpegPictureIntervalQ32(uint8_t frameRateCode, uint8_t frameRateExtensionN = 0u, uint8_t frameRateExtensionD = 0u)
         {
@@ -2625,6 +2626,26 @@ namespace ps2_stubs
         constexpr uint32_t kMpegCbNodata = 1u; // sceMpegCbNodata
         bool s_nodataMadeNoProgress = false;    // set for the retry after a callback that demuxed nothing
 
+        bool findMpegNodataCallback(uint32_t mpegAddr, uint32_t &func, uint32_t &data)
+        {
+            func = 0u;
+            data = 0u;
+            const auto callbacks = g_mpeg_stub_state.callbacksByMpeg.find(mpegAddr);
+            if (callbacks == g_mpeg_stub_state.callbacksByMpeg.end())
+            {
+                return false;
+            }
+            for (const MpegRegisteredCallback &callback : callbacks->second)
+            {
+                if (!callback.stream && callback.type == kMpegCbNodata)
+                {
+                    func = callback.func;
+                    data = callback.data;
+                }
+            }
+            return func != 0u;
+        }
+
         // Runs the game's sceMpegCbNodata callback on the current thread, then retries sceMpegGetPicture.
         // The callback typically demuxes more of the stream and sends the next part of the video bitstream to the
         // IPU (DMA ch4). This HLE decodes the demuxed stream itself, so whatever was sent to the IPU counts as consumed:
@@ -2698,6 +2719,28 @@ namespace ps2_stubs
                     playback.cdStreamGeneration = g_mpeg_stub_state.cdStreamGeneration;
                 }
             }
+            uint32_t nodataFunc = 0u;
+            uint32_t nodataData = 0u;
+            const bool hasNodataCallback =
+                findMpegNodataCallback(mpegAddr, nodataFunc, nodataData) &&
+                runtime->hasFunction(nodataFunc);
+            const bool nodataMadeNoProgress = s_nodataMadeNoProgress;
+            s_nodataMadeNoProgress = false;
+            // Self-fed movies demux only inside the nodata callback. Refill before asynchronous reads drain the
+            // decoded queue, while retaining the current picture when the callback cannot make progress yet.
+            if (!playback.decodedFrames.empty() &&
+                playback.decodedFrames.size() <= kMpegNodataPrefetchPictures &&
+                g_mpeg_stub_state.cdStreamGeneration == 0u &&
+                !g_mpeg_stub_state.currentCdStreamEofSeen &&
+                !playback.sawSequenceEnd &&
+                !playback.streamEnded &&
+                !playback.decoderFailed &&
+                hasNodataCallback &&
+                !nodataMadeNoProgress)
+            {
+                lock.unlock();
+                invokeNodataCallback(rdram, ctx, runtime, mpegAddr, nodataFunc, nodataData);
+            }
             if (playback.decodedFrames.empty() &&
                 !g_mpeg_stub_state.currentCdStreamEofSeen &&
                 !playback.streamEnded &&
@@ -2716,22 +2759,7 @@ namespace ps2_stubs
                 // libmpeg asks the game for more bitstream through its sceMpegCbNodata callback whenever the decoder
                 // runs dry, and games without a separate demux thread (Killzone) only demux from inside it. Do the
                 // same before parking the thread.
-                uint32_t nodataFunc = 0u;
-                uint32_t nodataData = 0u;
-                if (const auto cbs = g_mpeg_stub_state.callbacksByMpeg.find(mpegAddr); cbs != g_mpeg_stub_state.callbacksByMpeg.end())
-                {
-                    for (const MpegRegisteredCallback &cb : cbs->second)
-                    {
-                        if (!cb.stream && cb.type == kMpegCbNodata)
-                        {
-                            nodataFunc = cb.func;
-                            nodataData = cb.data;
-                        }
-                    }
-                }
-                const bool noProgress = s_nodataMadeNoProgress;
-                s_nodataMadeNoProgress = false;
-                if (nodataFunc != 0u && runtime->hasFunction(nodataFunc) && noProgress)
+                if (hasNodataCallback && nodataMadeNoProgress)
                 {
                     // The callback had nothing to demux yet (the stream read is asynchronous). Return without a new
                     // picture instead of parking the only thread that can demux; the game calls again next frame.
@@ -2740,7 +2768,7 @@ namespace ps2_stubs
                     return;
                 }
                 lock.unlock();
-                if (nodataFunc != 0u && runtime->hasFunction(nodataFunc))
+                if (hasNodataCallback)
                 {
                     invokeNodataCallback(rdram, ctx, runtime, mpegAddr, nodataFunc, nodataData);
                 }

@@ -184,6 +184,8 @@ namespace
     std::atomic<uint32_t> gMpegWaitStage{0u};
     std::atomic<uint32_t> gMpegNoDuplicateStage{0u};
     std::atomic<uint32_t> gMpegNoDuplicateProducerStage{0u};
+    std::atomic<uint32_t> gMpegPrefetchCallbackCount{0u};
+    std::atomic<uint32_t> gMpegPrefetchStage{0u};
 
     constexpr uint32_t kMpegWaitMainPc = 0x00125000u;
     constexpr uint32_t kMpegWaitResumePc = 0x00125010u;
@@ -195,6 +197,11 @@ namespace
     constexpr uint32_t kMpegNoDuplicateProducerPc = 0x00125050u;
     constexpr uint32_t kMpegNoDuplicateHandle = 0x00124000u;
     constexpr uint32_t kMpegNoDuplicateImage = 0x00131000u;
+    constexpr uint32_t kMpegPrefetchMainPc = 0x00125060u;
+    constexpr uint32_t kMpegPrefetchResumePc = 0x00125070u;
+    constexpr uint32_t kMpegPrefetchCallbackPc = 0x00125080u;
+    constexpr uint32_t kMpegPrefetchHandle = 0x00124500u;
+    constexpr uint32_t kMpegPrefetchImage = 0x00132000u;
     constexpr uint32_t kIpuInitMainPc = 0x00125100u;
     constexpr uint32_t kIpuInitResumePc = 0x00125104u;
     constexpr uint32_t kIpuSetD4Pc = 0x00126428u;
@@ -281,6 +288,29 @@ namespace
             std::memory_order_release);
         gMpegNoDuplicateStage.store(2u, std::memory_order_release);
         ps2_stubs::notifyMpegCdStreamEof(runtime);
+        ctx->pc = 0u;
+    }
+
+    void testMpegPrefetchMain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gMpegPrefetchStage.store(1u, std::memory_order_release);
+        setRegU32(*ctx, 4, kMpegPrefetchHandle);
+        setRegU32(*ctx, 5, kMpegPrefetchImage);
+        ctx->pc = kMpegPrefetchResumePc;
+        ps2_stubs::sceMpegGetPicture(rdram, ctx, runtime);
+    }
+
+    void testMpegPrefetchResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gMpegPrefetchStage.store(3u, std::memory_order_release);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void testMpegPrefetchCallback(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        gMpegPrefetchCallbackCount.fetch_add(1u, std::memory_order_acq_rel);
+        gMpegPrefetchStage.store(2u, std::memory_order_release);
         ctx->pc = 0u;
     }
 
@@ -809,6 +839,40 @@ void register_ps2_runtime_expansion_tests()
                      "EOF should resume the blocked GetPicture continuation");
             t.Equals(Ps2FastRead32(rdram.data(), kMpegNoDuplicateHandle + 0x08u), 1u,
                      "only the injected decoder frame should be counted as served");
+        });
+
+        tc.Run("sceMpegGetPicture prefetches before the decoded picture queue runs dry", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+            for (int i = 0; i < 4; ++i)
+            {
+                ps2_stubs::enqueueMpegDecodedFrameForTesting(kMpegPrefetchHandle);
+            }
+
+            runtime.registerFunction(kMpegPrefetchMainPc, testMpegPrefetchMain);
+            runtime.registerFunction(kMpegPrefetchResumePc, testMpegPrefetchResume);
+            runtime.registerFunction(kMpegPrefetchCallbackPc, testMpegPrefetchCallback);
+
+            R5900Context callbackCtx{};
+            setRegU32(callbackCtx, 4, kMpegPrefetchHandle);
+            setRegU32(callbackCtx, 5, 1u);
+            setRegU32(callbackCtx, 6, kMpegPrefetchCallbackPc);
+            setRegU32(callbackCtx, 7, 0u);
+            ps2_stubs::sceMpegAddCallback(rdram.data(), &callbackCtx, &runtime);
+
+            gMpegPrefetchCallbackCount.store(0u, std::memory_order_release);
+            gMpegPrefetchStage.store(0u, std::memory_order_release);
+            R5900Context mainContext{};
+            mainContext.pc = kMpegPrefetchMainPc;
+            runtime.eeScheduler().reset(rdram.data(), mainContext);
+            runtime.eeScheduler().run();
+
+            t.Equals(gMpegPrefetchCallbackCount.load(std::memory_order_acquire), 1u,
+                     "low-water decoded queue should request more bitstream before presenting");
+            t.Equals(gMpegPrefetchStage.load(std::memory_order_acquire), 3u,
+                     "picture delivery should resume after the prefetch callback");
         });
 
         tc.Run("sceSdRemote isolates voice transfers from block streaming state", [](TestCase &t)
