@@ -581,6 +581,7 @@ namespace ps2_stubs
             uint64_t presentationEndTickQ32 = std::numeric_limits<uint64_t>::max();
             int64_t firstPresentedPts90k = -1;
             uint64_t ptsPresentationBaseTickQ32 = 0u;
+            uint32_t prefetchCallbacksSincePicture = 0u;
         };
 
         struct MpegStreamCallbackEvent
@@ -2048,6 +2049,12 @@ namespace ps2_stubs
         playback.decodedFrames.push_back(std::move(frame));
     }
 
+    void notifyMpegPssProgressForTesting()
+    {
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        ++g_mpeg_stub_state.pssBytesAppended;
+    }
+
     void notifyMpegCdStreamStart(PS2Runtime *runtime)
     {
         (void)runtime;
@@ -2694,6 +2701,7 @@ namespace ps2_stubs
         constexpr uint32_t kMpegCbNodata = 1u; // sceMpegCbNodata
         bool s_nodataMadeNoProgress = false;    // set for the retry after a callback that demuxed nothing
         constexpr size_t kNodataReadAheadPictures = 4u;
+        constexpr uint32_t kMaxPrefetchCallbacksPerPicture = 2u; // bound time away from guest audio maintenance
 
         // PS2X_MPEG_READAHEAD=0 turns the NoData read-ahead in sceMpegGetPicture off.
         bool mpegNodataReadAheadDisabled()
@@ -2876,12 +2884,14 @@ namespace ps2_stubs
                 s_nodataMadeNoProgress = false;
                 if (!lastMadeNoProgress && playback.decodedFrames.size() < kNodataReadAheadPictures &&
                     g_mpeg_stub_state.cdStreamGeneration == 0u && !playback.streamEnded && !playback.sawSequenceEnd &&
-                    !playback.decoderFailed && !mpegNodataReadAheadDisabled())
+                    !playback.decoderFailed && !mpegNodataReadAheadDisabled() &&
+                    playback.prefetchCallbacksSincePicture < kMaxPrefetchCallbacksPerPicture)
                 {
                     uint32_t nodataData = 0u;
                     const uint32_t nodataFunc = mpegNodataCallback(mpegAddr, nodataData);
                     if (nodataFunc != 0u && runtime->hasFunction(nodataFunc))
                     {
+                        ++playback.prefetchCallbacksSincePicture;
                         lock.unlock();
                         invokeNodataCallback(rdram, ctx, runtime, mpegAddr, nodataFunc, nodataData);
                     }
@@ -2941,6 +2951,7 @@ namespace ps2_stubs
                 g_mpeg_stats.intervalQ32 = frameIntervalQ32;
                 playback.width = static_cast<uint32_t>(frame->width);
                 playback.height = static_cast<uint32_t>(frame->height);
+                playback.prefetchCallbacksSincePicture = 0u;
                 width = playback.width;
                 height = playback.height;
                 frameCount = playback.picturesServed;
