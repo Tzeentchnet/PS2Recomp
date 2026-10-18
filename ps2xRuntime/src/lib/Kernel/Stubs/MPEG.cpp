@@ -573,6 +573,7 @@ namespace ps2_stubs
             uint64_t presentationEndTickQ32 = std::numeric_limits<uint64_t>::max();
             int64_t firstPresentedPts90k = -1;
             uint64_t ptsPresentationBaseTickQ32 = 0u;
+            uint32_t prefetchCallbacksSincePicture = 0u;
         };
 
         struct MpegStreamCallbackEvent
@@ -1980,6 +1981,12 @@ namespace ps2_stubs
         playback.decodedFrames.push_back(std::move(frame));
     }
 
+    void notifyMpegPssProgressForTesting()
+    {
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        ++g_mpeg_stub_state.pssBytesAppended;
+    }
+
     void notifyMpegCdStreamStart(PS2Runtime *runtime)
     {
         (void)runtime;
@@ -2625,6 +2632,7 @@ namespace ps2_stubs
 
         constexpr uint32_t kMpegCbNodata = 1u; // sceMpegCbNodata
         bool s_nodataMadeNoProgress = false;    // set for the retry after a callback that demuxed nothing
+        constexpr uint32_t kMaxPrefetchCallbacksPerPicture = 2u; // bound time away from guest audio maintenance
 
         bool findMpegNodataCallback(uint32_t mpegAddr, uint32_t &func, uint32_t &data)
         {
@@ -2736,8 +2744,10 @@ namespace ps2_stubs
                 !playback.streamEnded &&
                 !playback.decoderFailed &&
                 hasNodataCallback &&
-                !nodataMadeNoProgress)
+                !nodataMadeNoProgress &&
+                playback.prefetchCallbacksSincePicture < kMaxPrefetchCallbacksPerPicture)
             {
+                ++playback.prefetchCallbacksSincePicture;
                 lock.unlock();
                 invokeNodataCallback(rdram, ctx, runtime, mpegAddr, nodataFunc, nodataData);
             }
@@ -2826,6 +2836,7 @@ namespace ps2_stubs
                 playback.decodedFrames.pop_front();
                 playback.width = static_cast<uint32_t>(frame.width);
                 playback.height = static_cast<uint32_t>(frame.height);
+                playback.prefetchCallbacksSincePicture = 0u;
                 width = playback.width;
                 height = playback.height;
                 frameCount = playback.picturesServed;

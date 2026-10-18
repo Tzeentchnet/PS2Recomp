@@ -311,6 +311,7 @@ namespace
     {
         gMpegPrefetchCallbackCount.fetch_add(1u, std::memory_order_acq_rel);
         gMpegPrefetchStage.store(2u, std::memory_order_release);
+        ps2_stubs::notifyMpegPssProgressForTesting();
         ctx->pc = 0u;
     }
 
@@ -841,7 +842,7 @@ void register_ps2_runtime_expansion_tests()
                      "only the injected decoder frame should be counted as served");
         });
 
-        tc.Run("sceMpegGetPicture prefetches before the decoded picture queue runs dry", [](TestCase &t)
+        tc.Run("sceMpegGetPicture caps proactive refills before presenting a picture", [](TestCase &t)
         {
             PS2Runtime runtime;
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
@@ -869,8 +870,8 @@ void register_ps2_runtime_expansion_tests()
             runtime.eeScheduler().reset(rdram.data(), mainContext);
             runtime.eeScheduler().run();
 
-            t.Equals(gMpegPrefetchCallbackCount.load(std::memory_order_acquire), 1u,
-                     "low-water decoded queue should request more bitstream before presenting");
+            t.Equals(gMpegPrefetchCallbackCount.load(std::memory_order_acquire), 2u,
+                     "low-water decoded queue should cap consecutive proactive refill callbacks");
             t.Equals(gMpegPrefetchStage.load(std::memory_order_acquire), 3u,
                      "picture delivery should resume after the prefetch callback");
         });
