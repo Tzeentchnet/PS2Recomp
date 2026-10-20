@@ -101,7 +101,16 @@ struct ChainVerifySeg
     uint32_t n;
     uint32_t dst;
     uint32_t id;
+    uint32_t sourceAddress;
+    uint32_t tagAddress;
+    uint32_t nextTagAddress;
+    uint32_t asr0;
+    uint32_t asr1;
+    uint8_t aspBefore;
+    uint8_t aspAfter;
+    uint8_t kind; // 0 = tag payload, 1 = TTE upper 64 bits
 };
 bool ps2ChainVerifyEnabled();
 void ps2ChainVerifyRegister(const uint8_t *bufData, std::vector<ChainVerifySeg> &&segs);
 void ps2ChainVerifyCheck(const uint8_t *bufData);
+void ps2ChainVerifyReportUnknown(const uint8_t *bufData, uint32_t offset, uint32_t command);

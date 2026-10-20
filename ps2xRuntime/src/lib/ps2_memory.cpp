@@ -1802,10 +1802,16 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     const bool verifyChain = ps2ChainVerifyEnabled();
                     std::vector<ChainVerifySeg> verifySegs;
                     uint32_t curTagId = 0u;
-                    auto emit = [&](const uint8_t *src, size_t n)
+                    uint32_t provenanceTagAddr = 0u, provenanceNextTagAddr = 0u;
+                    uint32_t provenanceAsr0 = 0u, provenanceAsr1 = 0u;
+                    uint8_t provenanceAspBefore = 0u, provenanceAspAfter = 0u;
+                    auto emit = [&](const uint8_t *src, size_t n, uint32_t sourceAddress, uint8_t kind)
                     {
                         if (verifyChain)
-                            verifySegs.push_back({src, static_cast<uint32_t>(n), static_cast<uint32_t>(chainBuf.size()), curTagId});
+                            verifySegs.push_back({src, static_cast<uint32_t>(n), static_cast<uint32_t>(chainBuf.size()),
+                                                  curTagId, sourceAddress, provenanceTagAddr, provenanceNextTagAddr,
+                                                  provenanceAsr0, provenanceAsr1, provenanceAspBefore,
+                                                  provenanceAspAfter, kind});
                         chainBuf.insert(chainBuf.end(), src, src + n);
                     };
                     const bool chainStats = g_chainStats.on && channelBase == 0x10009000u;
@@ -1843,7 +1849,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 chunk = maxSz2 - src;
                             if (chunk == 0)
                                 break;
-                            emit(base2 + src, chunk);
+                            const uint32_t sourceAddress = scratch ? (0x70000000u | src) : src;
+                            emit(base2 + src, chunk, sourceAddress, 0u);
                             bytes -= chunk;
                             src += chunk;
                         }
@@ -1862,7 +1869,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                         // CHCR.TTE sends the DMAtag's upper 64 bits to the channel before
                         // the tag payload. VIF chains use those bytes for two VIFcodes.
-                        emit(localBase + tagPhys + 8u, 8u);
+                        emit(localBase + tagPhys + 8u, 8u, localTagAddr + 8u, 1u);
                     };
 
                     const bool isVifChannel =
@@ -1915,6 +1922,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint32_t dataAddr = 0;
                         bool hasPayload = (tagQwc > 0);
                         bool endChain = false;
+                        const uint8_t aspBefore = static_cast<uint8_t>(asp);
 
                         switch (id)
                         {
@@ -1950,8 +1958,17 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                     asr1 = retAddr;
                                     asp = 2u;
                                 }
+                                else
+                                {
+                                    std::fprintf(stderr,
+                                                 "[dmac] CALL stack overflow at tag 0x%08x (addr 0x%08x, qwc %u); "
+                                                 "terminating chain\n",
+                                                 currentTagAddr, addr, tagQwc);
+                                    endChain = true;
+                                }
                             }
-                            tagAddr = addr;
+                            if (!endChain)
+                                tagAddr = addr;
                             break;
                         case 6:
                             dataAddr = tagAddr + 16;
@@ -1980,14 +1997,20 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                         }
 
+                        curTagId = id;
+                        provenanceTagAddr = currentTagAddr;
+                        provenanceNextTagAddr = tagAddr;
+                        provenanceAsr0 = asr0;
+                        provenanceAsr1 = asr1;
+                        provenanceAspBefore = aspBefore;
+                        provenanceAspAfter = static_cast<uint8_t>(asp);
+
                         if (transferTagData)
                         {
                             appendVifTagData(currentTagAddr);
                             if (chainStats)
                                 g_chainStats.tagBytes += 8u;
                         }
-                        curTagId = id;
-
                         if (hasPayload)
                             appendData(dataAddr, tagQwc);
                         if (irq && tieEnabled)
