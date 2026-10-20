@@ -398,7 +398,7 @@ namespace
         uint32_t num = (cmd >> 16) & 0xFFu;
         if (num == 0u)
             num = 256u;
-        const uint32_t cl = regs.cycle & 0xFFu;
+        const uint32_t cl = (regs.cycle & 0xFFu) ? (regs.cycle & 0xFFu) : 256u;
         const uint32_t wl = ((regs.cycle >> 8) & 0xFFu) ? ((regs.cycle >> 8) & 0xFFu) : 256u;
         const bool isFill = cl < wl;
         const uint32_t mode = (vnvl == 15u) ? 0u : (regs.mode & 3u);
@@ -1198,7 +1198,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (!legacyVif1Unpack())
             {
                 // PCSX2 source size: fill mode reads CL vectors per WL block (WL = 0 means 256).
-                const uint32_t pcl = vif1_regs.cycle & 0xFFu;
+                const uint32_t pcl = (vif1_regs.cycle & 0xFFu) ? (vif1_regs.cycle & 0xFFu) : 256u;
                 const uint32_t pwl = ((vif1_regs.cycle >> 8) & 0xFFu) ? ((vif1_regs.cycle >> 8) & 0xFFu) : 256u;
                 const uint32_t srcVectors = (pcl < pwl) ? pcl * (writeVectorCount / pwl) + std::min(writeVectorCount % pwl, pcl)
                                                         : writeVectorCount;
