@@ -897,9 +897,30 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             c.fetch_add(n, std::memory_order_relaxed);
     };
 
+    auto applyMpgUpload = [&](uint32_t destAddr, const uint8_t *src, uint32_t size)
+    {
+        if (!m_vu1Code || size == 0u)
+            return;
+
+        const uint32_t firstSize = std::min<uint32_t>(size, PS2_VU1_CODE_SIZE - destAddr);
+        const uint32_t secondSize = size - firstSize;
+        const bool same =
+            std::memcmp(m_vu1Code + destAddr, src, firstSize) == 0 &&
+            (secondSize == 0u || std::memcmp(m_vu1Code, src + firstSize, secondSize) == 0);
+        if (!same || !mpgSkipSameEnabled())
+        {
+            std::memcpy(m_vu1Code + destAddr, src, firstSize);
+            if (secondSize != 0u)
+                std::memcpy(m_vu1Code, src + firstSize, secondSize);
+            markVU1CodeModified();
+        }
+        if (ps2Vif1StatsEnabled())
+            ps2Vif1StatMpg(same);
+    };
+
     uint32_t pos = 0;
 
-    while (pos + 4 <= sizeBytes)
+    while (pos + 4u <= sizeBytes)
     {
         if (m_vif1PendingDirectQwc != 0u)
         {
@@ -1057,32 +1078,15 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         else if (opcode == VIF_MPG)
         {
             count(st.vif1Mpg);
-            uint32_t destAddr = (uint32_t)imm * 8u;
+            const uint32_t destAddr = (static_cast<uint32_t>(imm) * 8u) & (PS2_VU1_CODE_SIZE - 1u);
             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             const uint32_t mpgBytes = instructionCount * 8u;
-            if (m_vu1Code && destAddr < PS2_VU1_CODE_SIZE && mpgBytes > 0)
-            {
-                uint32_t copyBytes = mpgBytes;
-                if (destAddr + copyBytes > PS2_VU1_CODE_SIZE)
-                    copyBytes = PS2_VU1_CODE_SIZE - destAddr;
-                if (pos + copyBytes <= sizeBytes)
-                {
-                    // The game re-sends microcode all the time; an upload that changes nothing must not invalidate the
-                    // host VU's recompiled programs (each generation change makes the next MSCALs search the program
-                    // lists again).
-                    const bool same = std::memcmp(m_vu1Code + destAddr, data + pos, copyBytes) == 0;
-                    if (!same || !mpgSkipSameEnabled())
-                    {
-                        std::memcpy(m_vu1Code + destAddr, data + pos, copyBytes);
-                        markVU1CodeModified();
-                    }
-                    if (ps2Vif1StatsEnabled())
-                        ps2Vif1StatMpg(same);
-                }
-            }
-            pos += mpgBytes;
-            if (pos > sizeBytes)
+            if (sizeBytes - pos < mpgBytes)
                 break;
+
+            // The game re-sends microcode frequently. Identical uploads do not invalidate host VU programs.
+            applyMpgUpload(destAddr, data + pos, mpgBytes);
+            pos += mpgBytes;
             continue;
         }
         else if (opcode == VIF_DIRECT || opcode == VIF_DIRECTHL)
