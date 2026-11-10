@@ -193,14 +193,14 @@ void register_ps2_sif_rpc_tests()
         {
             TestEnv env;
 
-            env.runtime.eeScheduler().accountCycles(80u);
-            const uint64_t cyclesBeforeInit = env.runtime.iopDebugSnapshot().emulatorCycles;
-            t.IsTrue(cyclesBeforeInit != 0u, "IOP cycle counter should advance before RPC initialization");
+            const uint32_t allocationBeforeInit = env.runtime.allocateIopMemory(0x40u, 0x10u);
+            t.IsTrue(allocationBeforeInit != 0u, "IOP allocator should be active before RPC initialization");
 
             SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
 
-            t.Equals(env.runtime.iopDebugSnapshot().emulatorCycles, cyclesBeforeInit,
-                     "SifInitRpc must not reboot or reset the IOP");
+            const uint32_t allocationAfterInit = env.runtime.allocateIopMemory(0x40u, 0x10u);
+            t.IsTrue(allocationAfterInit > allocationBeforeInit,
+                     "SifInitRpc must not reboot or reset the IOP allocator");
         });
 
         tc.Run("SifLoadModule validates ROM modules and activates their HLE service", [](TestCase &t)

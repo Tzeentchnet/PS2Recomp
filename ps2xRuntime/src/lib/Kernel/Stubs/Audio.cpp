@@ -333,7 +333,7 @@ namespace ps2_stubs
         // shows up; the IOP thread keeps running meanwhile). Without one the old stub model stays in charge.
         g_sdr.bound = false;
         static const bool s_remoteEnabled = [] { const char *v = std::getenv("PS2X_SDR_REMOTE"); return !(v && v[0] == '0'); }();
-        if (s_remoteEnabled && PS2IopTransport::canBindRpc(runtime, kLibSdSid) && sdrAllocate(runtime))
+        if (runtime && s_remoteEnabled && PS2IopTransport::canBindRpc(runtime, kLibSdSid) && sdrAllocate(runtime))
         {
             for (int attempt = 0; attempt < 2000 && !g_sdr.bound; ++attempt)
             {

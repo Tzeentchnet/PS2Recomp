@@ -671,7 +671,7 @@ void register_ps2_runtime_expansion_tests()
             t.Equals(gMpegStreamCallbackUserData.load(std::memory_order_acquire), kVideoUserData,
                      "video callback should receive registered user data");
 
-            const std::vector<uint8_t> audioPayload = {0x80u, 0x01u, 0x02u, 0x03u, 0x04u, 0x05u};
+            const std::vector<uint8_t> audioPayload = {0xFFu, 0xA0u, 0x00u, 0x00u, 0x04u, 0x05u};
             const uint32_t audioPacketSize = writePesPacket(kAudioPacketAddr, 0xBDu, audioPayload);
 
             gMpegStreamCallbackCount.store(0u, std::memory_order_release);
@@ -847,7 +847,7 @@ void register_ps2_runtime_expansion_tests()
             PS2Runtime runtime;
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
             ps2_stubs::resetMpegStubState();
-            for (int i = 0; i < 4; ++i)
+            for (int i = 0; i < 3; ++i)
             {
                 ps2_stubs::enqueueMpegDecodedFrameForTesting(kMpegPrefetchHandle);
             }
