@@ -100,6 +100,16 @@ namespace
         return on;
     }
 
+    bool stopOnUnknownEnabled()
+    {
+        static const bool on = []
+        {
+            const char *v = std::getenv("PS2X_VIF1_STOP_ON_UNKNOWN");
+            return v && *v && *v != '0';
+        }();
+        return on;
+    }
+
     // PS2X_MPG_SKIP_SAME=0: bump the VU1 code generation on every MPG, even when the bytes did not change.
     bool mpgSkipSameEnabled()
     {
@@ -1412,6 +1422,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         else
         {
             count(st.vif1Unknown);
+            ps2ChainVerifyReportUnknown(data, pos - 4u, cmd);
+            if (stopOnUnknownEnabled())
+                return;
             continue;
         }
     }

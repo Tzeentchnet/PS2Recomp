@@ -1751,6 +1751,49 @@ void register_ps2_memory_tests()
             t.IsTrue(secondQwOk, "END payload should follow CALL payload");
         });
 
+        tc.Run("GIF DMA chain CALL stack overflow terminates the chain", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kTag0 = 0x00026600u;
+            constexpr uint32_t kTag1 = 0x00026700u;
+            constexpr uint32_t kTag2 = 0x00026800u;
+            constexpr uint32_t kTagAfterOverflow = 0x00026900u;
+            uint8_t *rdram = mem.getRDRAM();
+
+            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 5u, kTag1, false));
+            writeDmaTag(rdram, kTag1, makeDmaTag(1u, 5u, kTag2, false));
+            writeDmaTag(rdram, kTag2, makeDmaTag(1u, 5u, kTagAfterOverflow, false));
+            writeDmaTag(rdram, kTagAfterOverflow, makeDmaTag(1u, 7u, 0u, false));
+            for (uint32_t tag = 0; tag < 4u; ++tag)
+                std::memset(rdram + kTag0 + tag * 0x100u + 16u, static_cast<int>(0x20u + tag), 16u);
+
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.emplace_back(data, data + sizeBytes);
+            });
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kTag0), "write TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR should succeed");
+            mem.processPendingTransfers();
+
+            t.Equals(captured.size(), static_cast<size_t>(1u), "overflowing CALL chain should emit one packet");
+            if (captured.size() != 1u)
+                return;
+            t.Equals(captured[0].size(), static_cast<size_t>(48u),
+                     "overflowing CALL should transfer its payload but not follow its ADDR");
+            if (captured[0].size() != 48u)
+                return;
+            bool payloadsOk = true;
+            for (uint32_t tag = 0; tag < 3u; ++tag)
+                for (uint32_t i = 0; i < 16u; ++i)
+                    payloadsOk &= captured[0][tag * 16u + i] == static_cast<uint8_t>(0x20u + tag);
+            t.IsTrue(payloadsOk, "CALL payloads before the overflow should remain ordered");
+        });
+
         tc.Run("GIF DMA chain RET transfers payload and resumes after CALL", [](TestCase &t)
         {
             PS2Memory mem;

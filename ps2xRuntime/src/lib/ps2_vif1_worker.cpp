@@ -654,6 +654,7 @@ namespace
         {
             std::vector<ChainVerifySeg> segs;
             std::chrono::steady_clock::time_point t0;
+            bool unknownReported = false;
         };
         std::unordered_map<const uint8_t *, Entry> pending;
         uint64_t jobs = 0, segsChecked[8] = {}, segsBad[8] = {}, bytesChecked[8] = {}, bytesBad[8] = {};
@@ -739,6 +740,46 @@ void ps2ChainVerifyCheck(const uint8_t *bufData)
             g_verify.segsChecked[i] = g_verify.segsBad[i] = g_verify.bytesChecked[i] = g_verify.bytesBad[i] = 0;
         g_verify.last = now;
     }
+}
+
+void ps2ChainVerifyReportUnknown(const uint8_t *bufData, uint32_t offset, uint32_t command)
+{
+    if (!ps2ChainVerifyEnabled())
+        return;
+    std::lock_guard<std::mutex> lock(g_verify.mutex);
+    auto entry = g_verify.pending.find(bufData);
+    if (entry == g_verify.pending.end() || entry->second.unknownReported)
+        return;
+    entry->second.unknownReported = true;
+
+    const auto &segs = entry->second.segs;
+    size_t hit = segs.size();
+    for (size_t i = 0; i < segs.size(); ++i)
+    {
+        if (offset >= segs[i].dst && offset - segs[i].dst < segs[i].n)
+        {
+            hit = i;
+            break;
+        }
+    }
+
+    std::fprintf(stderr, "[vif1-chain] first unknown command 0x%08x at flattened offset 0x%x (%s)\n", command, offset,
+                 hit == segs.size() ? "no source segment" : "source mapped");
+    if (hit != segs.size())
+    {
+        const size_t first = hit > 3 ? hit - 3 : 0;
+        for (size_t i = first; i <= hit; ++i)
+        {
+            const ChainVerifySeg &seg = segs[i];
+            std::fprintf(stderr,
+                         "[vif1-chain]   %s flat=0x%x-0x%x source=0x%08x tag=0x%08x id=%u next=0x%08x "
+                         "asp=%u->%u asr0=0x%08x asr1=0x%08x%s\n",
+                         seg.kind == 1u ? "TTE" : "payload", seg.dst, seg.dst + seg.n, seg.sourceAddress,
+                         seg.tagAddress, seg.id, seg.nextTagAddress, seg.aspBefore, seg.aspAfter, seg.asr0, seg.asr1,
+                         i == hit ? " <-- unknown" : "");
+        }
+    }
+    std::fflush(stderr);
 }
 
 void ps2ChainBufferRecycle(std::vector<uint8_t> &&buf)
