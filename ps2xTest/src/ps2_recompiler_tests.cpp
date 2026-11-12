@@ -286,7 +286,7 @@ static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::
     text->set_addr_align(4);
     text->set_address(0x00100000u);
 
-    std::array<uint32_t, 384> textWords{};
+    std::array<uint32_t, 448> textWords{};
     textWords[0] = 0x3C040010u;  // lui a0,0x10
     textWords[1] = 0xAC800000u;  // sw zero,0(a0)
     textWords[2] = 0x0C040008u;  // jal 0x00100020 (callback registrar)
@@ -519,6 +519,27 @@ static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::
     textWords[373] = 0x03E00008u; // jr ra
     textWords[374] = 0x27BD0010u; // addiu sp,sp,0x10 (delay slot)
 
+    textWords[382] = 0x03E00008u; // jr ra
+    textWords[383] = 0x00000000u; // nop (delay slot)
+    const std::array<uint32_t, 8> shortHandler = {
+        0x8C8F002Cu, 0x8DEE0000u, 0x95CF0010u, 0x25EDFFD4u,
+        0x25EFFF8Eu, 0xA5CD0064u, 0x03E00008u, 0xA5CF0034u};
+    const std::array<uint32_t, 10> mediumHandler = {
+        0x8C8F002Cu, 0x240E000Au, 0x8DED0000u, 0x95AF0010u, 0xA5AE0094u,
+        0x25EEFFD4u, 0x25EFFF8Eu, 0xA5AE0064u, 0x03E00008u, 0xA5AF0034u};
+    const std::array<uint32_t, 13> longHandler = {
+        0x8C8F002Cu, 0x8C8E25B4u, 0x8DED0000u, 0x8C8C0030u, 0x8DAF0010u,
+        0xADAE0048u, 0x000F77C2u, 0x01EE7821u, 0x000F7843u, 0xA5AF0034u,
+        0x858F0004u, 0x03E00008u, 0xADAF0070u};
+    std::copy(shortHandler.begin(), shortHandler.end(), textWords.begin() + 384);
+    std::copy(mediumHandler.begin(), mediumHandler.end(), textWords.begin() + 392);
+    std::copy(longHandler.begin(), longHandler.end(), textWords.begin() + 402);
+
+    const std::array<uint32_t, 8> repeatedHandler = {
+        0x8C820000u, 0x24420001u, 0x24420001u, 0x24420001u,
+        0x24420001u, 0x24420001u, 0x03E00008u, 0x00000000u};
+    std::copy(repeatedHandler.begin(), repeatedHandler.end(), textWords.begin() + 415);
+
     text->set_data(reinterpret_cast<const char *>(textWords.data()),
                    static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
 
@@ -551,9 +572,22 @@ static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::
     data->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_WRITE);
     data->set_addr_align(4);
     data->set_address(0x00201000u);
-    std::array<uint32_t, 17> singletonCallbacks{};
+    std::array<uint32_t, 112> singletonCallbacks{};
     singletonCallbacks[0] = 0x00100580u;
     singletonCallbacks[16] = 0x00100588u;
+    const std::array<uint32_t, 24> handlerRecords = {
+        0x00201000u, 0x3u, 0xEu, 0xDu, 0x10020u, 0x00100600u,
+        0x00201000u, 0x4u, 0xEu, 0xDu, 0x10020u, 0x00100620u,
+        0x00201000u, 0x3u, 0xEu, 0xDu, 0x20020u, 0x00100648u,
+        0x00201000u, 0x4u, 0xEu, 0xDu, 0x10014u, 0x0u};
+    std::copy(handlerRecords.begin(), handlerRecords.end(), singletonCallbacks.begin() + 25);
+
+    singletonCallbacks[55] = 0x00100604u;
+    singletonCallbacks[65] = 0x00100624u;
+    singletonCallbacks[75] = 0x0010064Cu;
+    singletonCallbacks[85] = 0x0010067Cu;
+    singletonCallbacks[95] = 0x0010067Cu;
+    singletonCallbacks[105] = 0x0010067Cu;
     data->set_data(reinterpret_cast<const char *>(singletonCallbacks.data()),
                    static_cast<ELFIO::Elf_Word>(singletonCallbacks.size() * sizeof(uint32_t)));
 
@@ -1658,6 +1692,20 @@ void register_ps2_recompiler_tests()
                       "a data pointer must not split a function at a control-transfer delay slot");
             t.IsFalse(hasStart(0x00100300u),
                       "an isolated data pointer or non-callback code materialization must not become a function");
+            t.IsTrue(hasStart(0x00100600u),
+                     "a strided record table should discover its short leaf handler");
+            t.IsTrue(hasStart(0x00100620u),
+                     "a strided record table should discover a handler that returns beyond the probe window");
+            t.IsTrue(hasStart(0x00100648u),
+                     "a strided record table should discover its longest leaf handler");
+            t.IsFalse(hasStart(0x00100604u),
+                      "strided pointers to internal labels should not split handlers");
+            t.IsFalse(hasStart(0x00100624u),
+                      "a periodic table target must follow a control-transfer delay slot");
+            t.IsFalse(hasStart(0x0010064Cu),
+                      "a long handler's internal label should remain part of its owner");
+            t.IsFalse(hasStart(0x0010067Cu),
+                      "a repeated struct field should not be treated as a handler table");
 
             std::error_code removeError;
             std::filesystem::remove(elfPath, removeError);
