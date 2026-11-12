@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 
 enum VIFCmd : uint8_t
 {
@@ -980,6 +981,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         data = bufferedData.data();
         sizeBytes = static_cast<uint32_t>(bufferedData.size());
     }
+    const auto retainPending = [&](uint32_t start)
+    {
+        if (start == 0u && !bufferedData.empty() && data == bufferedData.data())
+            m_vif1PendingPacket = std::move(bufferedData);
+        else
+            m_vif1PendingPacket.assign(data + start, data + sizeBytes);
+    };
 
     uint32_t pos = 0;
     while (pos + 4u <= sizeBytes)
@@ -1016,7 +1024,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
         if (payloadBytes > sizeBytes - pos)
         {
-            m_vif1PendingPacket.assign(data + commandStart, data + sizeBytes);
+            retainPending(commandStart);
             return;
         }
 
@@ -1470,5 +1478,5 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     }
 
     if (pos < sizeBytes)
-        m_vif1PendingPacket.assign(data + pos, data + sizeBytes);
+        retainPending(pos);
 }
