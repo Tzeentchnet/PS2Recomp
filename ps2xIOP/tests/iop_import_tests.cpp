@@ -98,6 +98,126 @@ namespace
         return false;
     }
 
+    bool testImportDecodeCache()
+    {
+        IopMemory memory;
+        IopImportRegistry imports(memory);
+
+        constexpr uint32_t table = 0x1000u;
+        constexpr uint32_t stubCount = 1024u;
+        constexpr uint32_t firstStub = table + 20u;
+        constexpr uint32_t targetStub = firstStub + (stubCount - 1u) * 8u;
+        memory.write32(table, 0x41E00000u);
+        memory.write16(table + 8u, 0x0102u);
+        constexpr char library[8] = {'c', 'a', 'c', 'h', 'e', 'l', 'i', 'b'};
+        if (!expect(memory.writeRam(table + 12u, library, sizeof(library)),
+                    "import cache test library name did not fit"))
+            return false;
+        for (uint32_t index = 0u; index < stubCount; ++index)
+        {
+            const uint32_t stub = firstStub + index * 8u;
+            memory.write32(stub, 0x03E00008u);
+            memory.write32(stub + 4u, 0x24000000u | index);
+        }
+
+        const auto initial = imports.decode(targetStub);
+        if (!expect(initial && initial->library == "cachelib" &&
+                        initial->ordinal == stubCount - 1u &&
+                        initial->version == 0x0102u,
+                    "cold import decode returned the wrong call"))
+            return false;
+
+        const auto alias = imports.decode(0x80000000u | targetStub);
+        if (!expect(alias && alias->ordinal == stubCount - 1u,
+                    "physical-address cache key did not serve an aliased import stub"))
+            return false;
+
+        memory.write32(targetStub + 4u, 0x24000007u);
+        const auto changedOrdinal = imports.decode(targetStub);
+        if (!expect(changedOrdinal && changedOrdinal->ordinal == 7u,
+                    "cache did not revalidate the import stub delay word"))
+            return false;
+        memory.write32(targetStub + 4u, 0x24000000u | (stubCount - 1u));
+
+        memory.write32(targetStub, 0u);
+        if (!expect(!imports.decode(targetStub),
+                    "cache accepted a modified import stub return word"))
+            return false;
+        memory.write32(targetStub, 0x03E00008u);
+        if (!expect(static_cast<bool>(imports.decode(targetStub)),
+                    "restored import stub did not decode"))
+            return false;
+
+        memory.write32(table, 0u);
+        if (!expect(!imports.decode(targetStub),
+                    "cache accepted a removed import table"))
+            return false;
+        memory.write32(table, 0x41E00000u);
+        if (!expect(static_cast<bool>(imports.decode(targetStub)),
+                    "restored import table did not decode"))
+            return false;
+
+        constexpr char renamed[8] = {'n', 'e', 'w', 'l', 'i', 'b', '\0', '\0'};
+        if (!expect(memory.writeRam(table + 12u, renamed, sizeof(renamed)),
+                    "renamed import library did not fit"))
+            return false;
+        imports.eraseRange(table, targetStub + 8u - table);
+        const auto afterErase = imports.decode(targetStub);
+        if (!expect(afterErase && afterErase->library == "newlib",
+                    "module-range erase did not invalidate decoded imports"))
+            return false;
+
+        constexpr char resetName[8] = {'r', 'e', 's', 'e', 't', 'l', 'i', 'b'};
+        if (!expect(memory.writeRam(table + 12u, resetName, sizeof(resetName)),
+                    "reset import library name did not fit"))
+            return false;
+        imports.reset();
+        const auto afterReset = imports.decode(targetStub);
+        if (!expect(afterReset && afterReset->library == "resetlib",
+                    "registry reset did not invalidate decoded imports"))
+            return false;
+
+        constexpr uint32_t coldIterations = 200u;
+        constexpr uint32_t cachedIterations = 20000u;
+        uint64_t checksum = 0u;
+        const auto coldStart = std::chrono::steady_clock::now();
+        for (uint32_t iteration = 0u; iteration < coldIterations; ++iteration)
+        {
+            imports.reset();
+            const auto call = imports.decode(targetStub);
+            if (!call)
+                return expect(false, "cold benchmark import failed to decode");
+            checksum += call->ordinal;
+        }
+        const auto coldEnd = std::chrono::steady_clock::now();
+
+        imports.reset();
+        if (!expect(static_cast<bool>(imports.decode(targetStub)),
+                    "cached benchmark import failed to prime"))
+            return false;
+        const auto cachedStart = std::chrono::steady_clock::now();
+        for (uint32_t iteration = 0u; iteration < cachedIterations; ++iteration)
+        {
+            const auto call = imports.decode(targetStub);
+            if (!call)
+                return expect(false, "cached benchmark import failed to decode");
+            checksum += call->ordinal;
+        }
+        const auto cachedEnd = std::chrono::steady_clock::now();
+
+        const double coldNs =
+            static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(coldEnd - coldStart).count()) /
+            coldIterations;
+        const double cachedNs =
+            static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(cachedEnd - cachedStart).count()) /
+            cachedIterations;
+        std::cout << "IOP import decode benchmark: cold=" << coldNs
+                  << " ns/call cached=" << cachedNs
+                  << " ns/call speedup=" << (coldNs / cachedNs) << "x\n";
+        return expect(checksum != 0u, "import benchmark result was optimized away") &&
+               expect(cachedNs < coldNs, "decoded import cache was not faster than a cold scan");
+    }
+
     bool testLoadcoreRebootLibraryMode()
     {
         IopMemory memory;
@@ -330,7 +450,8 @@ namespace
 
 int main()
 {
-    if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
+    if (!testImportDecodeCache() || !testLoadcoreRebootLibraryMode() ||
+        !testCdvdSpecialControl() || !testCdvdSearchFile() ||
         !testTimrmanPeriodicCallback())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";

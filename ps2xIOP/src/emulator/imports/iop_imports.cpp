@@ -48,7 +48,8 @@ namespace ps2x::iop::detail
 
     std::optional<IopImportCall> IopImportRegistry::decode(uint32_t pc) const
     {
-        if (m_memory.read32(pc) != 0x03E00008u)
+        const uint32_t first = m_memory.read32(pc);
+        if (first != 0x03E00008u)
             return std::nullopt;
         const uint32_t delay = m_memory.read32(pc + 4u);
         if ((delay & 0xFFFF0000u) != 0x24000000u)
@@ -57,8 +58,13 @@ namespace ps2x::iop::detail
         const uint32_t physicalPc = IopMemory::physicalAddress(pc);
         if (const auto hit = m_decodeCache.find(physicalPc); hit != m_decodeCache.end())
         {
-            if (hit->second.delayWord == delay)
+            const CachedImport &cached = hit->second;
+            if (cached.firstWord == first &&
+                cached.delayWord == delay &&
+                m_memory.read32(cached.tableAddress) == kImportMagic)
+            {
                 return hit->second.call;
+            }
             m_decodeCache.erase(hit);
         }
         const uint32_t searchBegin = physicalPc > 0x10000u ? physicalPc - 0x10000u : 0u;
@@ -101,7 +107,7 @@ namespace ps2x::iop::detail
                     static_cast<uint16_t>(delay & 0xFFFFu),
                     m_memory.read16(table + 8u),
                 };
-                m_decodeCache[physicalPc] = CachedImport{delay, call};
+                m_decodeCache[physicalPc] = CachedImport{first, delay, table, call};
                 return call;
             }
         }
