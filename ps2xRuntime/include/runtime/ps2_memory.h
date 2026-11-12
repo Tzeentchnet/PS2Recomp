@@ -410,10 +410,8 @@ public:
     bool m_path3Masked = false;
     uint32_t m_vif1PendingPath2ImageQwc = 0u;
     bool m_vif1PendingPath2DirectHl = false;
-    // Remaining data qwords of a VIF1 DIRECT/DIRECTHL cut off by the end of a processVIF1Data() buffer; the next
-    // buffer starts with that raw data (no VIFcodes).
-    uint32_t m_vif1PendingDirectQwc = 0u;
-    bool m_vif1PendingDirectHl = false;
+    // Retains a VIFcode and its partial payload until the command can be applied atomically.
+    std::vector<uint8_t> m_vif1PendingPacket;
     std::vector<std::vector<uint8_t>> m_path3MaskedFifo;
 
     struct PendingTransfer

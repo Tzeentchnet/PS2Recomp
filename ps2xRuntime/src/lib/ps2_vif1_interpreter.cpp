@@ -133,6 +133,47 @@ namespace
     // Bytes of source data per vector, by VN<<2|VL (PCSX2 nVifT).
     constexpr uint8_t kVifGsize[16] = {4, 2, 1, 0, 8, 4, 2, 0, 12, 6, 3, 0, 16, 8, 4, 2};
 
+    uint32_t vif1UnpackPayloadSize(uint8_t opcode, uint8_t num, uint32_t cycle, bool legacy)
+    {
+        const uint32_t vectorCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
+        if (!legacy)
+        {
+            const uint32_t cl = (cycle & 0xFFu) ? (cycle & 0xFFu) : 256u;
+            const uint32_t wl = ((cycle >> 8) & 0xFFu) ? ((cycle >> 8) & 0xFFu) : 256u;
+            const uint32_t sourceVectors =
+                (cl < wl) ? cl * (vectorCount / wl) + std::min(vectorCount % wl, cl) : vectorCount;
+            return (sourceVectors * kVifGsize[opcode & 0xFu] + 3u) & ~3u;
+        }
+
+        const uint8_t vn = static_cast<uint8_t>((opcode >> 2) & 0x3u);
+        const uint8_t vl = static_cast<uint8_t>(opcode & 0x3u);
+        const uint32_t components = static_cast<uint32_t>(vn) + 1u;
+        uint32_t bitsPerComponent = 32u;
+        if (vl == 1u)
+            bitsPerComponent = 16u;
+        else if (vl == 2u)
+            bitsPerComponent = 8u;
+        else if (vl == 3u)
+            bitsPerComponent = (vn == 3u) ? 4u : 16u;
+
+        const uint32_t bitsPerVector = (vl == 3u && vn == 3u) ? 16u : components * bitsPerComponent;
+        const uint32_t bytesPerVector = (bitsPerVector + 7u) / 8u;
+        uint32_t cl = cycle & 0xFFu;
+        uint32_t wl = (cycle >> 8) & 0xFFu;
+        if (cl == 0u)
+            cl = 1u;
+        if (wl == 0u)
+            wl = 1u;
+
+        uint32_t sourceVectors = vectorCount;
+        if (cl < wl)
+        {
+            const uint32_t fullBlocks = vectorCount / wl;
+            sourceVectors = fullBlocks * cl + std::min(vectorCount % wl, cl);
+        }
+        return (sourceVectors * bytesPerVector + 3u) & ~3u;
+    }
+
     // ---- UNPACK fast path ------------------------------------------------------------------------------------------
     // Plain UNPACK (no mask, STMOD 0, not fill mode: WL <= CL) is nearly all of Killzone's ~8700 UNPACKs per frame. The
     // generic loop below does per-element bounds checks and a per-field mask/mode switch for every quadword; here each
@@ -931,26 +972,19 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             ps2Vif1StatMpg(same);
     };
 
-    uint32_t pos = 0;
+    std::vector<uint8_t> bufferedData;
+    if (!m_vif1PendingPacket.empty())
+    {
+        bufferedData.swap(m_vif1PendingPacket);
+        bufferedData.insert(bufferedData.end(), data, data + sizeBytes);
+        data = bufferedData.data();
+        sizeBytes = static_cast<uint32_t>(bufferedData.size());
+    }
 
+    uint32_t pos = 0;
     while (pos + 4u <= sizeBytes)
     {
-        if (m_vif1PendingDirectQwc != 0u)
-        {
-            // Continuation of a DIRECT that was cut off at the end of the previous buffer: raw GIF data, no VIFcodes.
-            const uint32_t availableQw = (sizeBytes - pos) / 16u;
-            if (availableQw == 0u)
-            {
-                break;
-            }
-
-            const uint32_t chunkQw = std::min<uint32_t>(m_vif1PendingDirectQwc, availableQw);
-            forwardVif1DirectData(data + pos, chunkQw * 16u, m_vif1PendingDirectHl);
-            pos += chunkQw * 16u;
-            m_vif1PendingDirectQwc -= chunkQw;
-            continue;
-        }
-
+        const uint32_t commandStart = pos;
         uint32_t cmd;
         memcpy(&cmd, data + pos, 4);
         pos += 4;
@@ -963,7 +997,30 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         // Track most-recent command for VIFn_CODE emulation.
         vif1_regs.code = cmd;
         vif1_regs.num = num;
-        if (irq)
+
+        const bool unpack = (opcode & 0x60u) == 0x60u;
+        const bool hasPayload =
+            opcode == VIF_STMASK || opcode == VIF_STROW || opcode == VIF_STCOL ||
+            opcode == VIF_MPG || opcode == VIF_DIRECT || opcode == VIF_DIRECTHL || unpack;
+        uint32_t payloadBytes = 0u;
+        if (opcode == VIF_STMASK)
+            payloadBytes = 4u;
+        else if (opcode == VIF_STROW || opcode == VIF_STCOL)
+            payloadBytes = 16u;
+        else if (opcode == VIF_MPG)
+            payloadBytes = ((num == 0u) ? 256u : static_cast<uint32_t>(num)) * 8u;
+        else if (opcode == VIF_DIRECT || opcode == VIF_DIRECTHL)
+            payloadBytes = ((imm == 0u) ? 65536u : static_cast<uint32_t>(imm)) * 16u;
+        else if (unpack)
+            payloadBytes = vif1UnpackPayloadSize(opcode, num, vif1_regs.cycle, legacyVif1Unpack());
+
+        if (payloadBytes > sizeBytes - pos)
+        {
+            m_vif1PendingPacket.assign(data + commandStart, data + sizeBytes);
+            return;
+        }
+
+        if (irq && !hasPayload)
             vif1_regs.stat |= (1u << 11); // INT
 
         if (opcode == VIF_NOP)
@@ -1064,28 +1121,28 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_STMASK)
         {
-            if (pos + 4 > sizeBytes)
-                break;
             uint32_t maskValue = 0;
             std::memcpy(&maskValue, data + pos, sizeof(maskValue));
             vif1_regs.mask = maskValue;
             pos += 4;
+            if (irq)
+                vif1_regs.stat |= (1u << 11);
             continue;
         }
         else if (opcode == VIF_STROW)
         {
-            if (pos + 16 > sizeBytes)
-                break;
             std::memcpy(vif1_regs.row, data + pos, 16);
             pos += 16;
+            if (irq)
+                vif1_regs.stat |= (1u << 11);
             continue;
         }
         else if (opcode == VIF_STCOL)
         {
-            if (pos + 16 > sizeBytes)
-                break;
             std::memcpy(vif1_regs.col, data + pos, 16);
             pos += 16;
+            if (irq)
+                vif1_regs.stat |= (1u << 11);
             continue;
         }
         else if (opcode == VIF_MPG)
@@ -1094,45 +1151,25 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             const uint32_t destAddr = (static_cast<uint32_t>(imm) * 8u) & (PS2_VU1_CODE_SIZE - 1u);
             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             const uint32_t mpgBytes = instructionCount * 8u;
-            if (sizeBytes - pos < mpgBytes)
-                break;
 
             // The game re-sends microcode frequently. Identical uploads do not invalidate host VU programs.
             applyMpgUpload(destAddr, data + pos, mpgBytes);
             pos += mpgBytes;
+            if (irq)
+                vif1_regs.stat |= (1u << 11);
             continue;
         }
         else if (opcode == VIF_DIRECT || opcode == VIF_DIRECTHL)
         {
-            uint32_t qwCount = imm;
-            if (qwCount == 0)
-                qwCount = 65536;
-            const uint32_t requestedQw = qwCount;
-            const uint32_t availableQw = (sizeBytes - pos) / 16u;
-            const bool truncated = qwCount > availableQw;
-            if (qwCount > availableQw)
-                qwCount = availableQw;
-
+            const uint32_t qwCount = (imm == 0u) ? 65536u : static_cast<uint32_t>(imm);
             const bool directHl = (opcode == VIF_DIRECTHL);
             count(st.vif1Direct);
-            count(st.vif1DirectQw, requestedQw);
-            if (truncated)
-            {
-                // The rest of this DIRECT's data starts the next buffer (see m_vif1PendingDirectQwc).
-                m_vif1PendingDirectQwc = requestedQw - qwCount;
-                m_vif1PendingDirectHl = directHl;
-            }
-            if (qwCount > 0)
-            {
-                forwardVif1DirectData(data + pos, qwCount * 16u, directHl);
-            }
+            count(st.vif1DirectQw, qwCount);
+            forwardVif1DirectData(data + pos, qwCount * 16u, directHl);
 
             pos += qwCount * 16;
-            if (truncated)
-            {
-                pos = sizeBytes;
-                break;
-            }
+            if (irq)
+                vif1_regs.stat |= (1u << 11);
             continue;
         }
         else if ((opcode & 0x60) == 0x60)
@@ -1214,8 +1251,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         checkedUnpack(m_vu1Data, PS2_VU1_DATA_SIZE, vif1_regs, cmd, data + pos, srcBytes);
                 }
                 pos += srcBytes;
-                if (pos > sizeBytes)
-                    break;
+                if (irq)
+                    vif1_regs.stat |= (1u << 11);
                 continue;
             }
 
@@ -1418,8 +1455,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             }
             pos += totalBytes;
 
-            if (pos > sizeBytes)
-                break;
+            if (irq)
+                vif1_regs.stat |= (1u << 11);
             continue;
         }
         else
@@ -1431,4 +1468,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             continue;
         }
     }
+
+    if (pos < sizeBytes)
+        m_vif1PendingPacket.assign(data + pos, data + sizeBytes);
 }

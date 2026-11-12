@@ -498,6 +498,181 @@ void register_ps2_memory_tests()
                      "truncated MPG payload should not partially modify VU1 micro memory");
         });
 
+        tc.Run("VIF1 fixed payload resumes across DMA blocks", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "split fixed-payload fixture should initialize");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kSource = 0x0002A000u;
+            const uint32_t blocks[][4] = {
+                {makeVifCmd(0x30u, 0u, 0u) | 0x80000000u,
+                 0x11111111u, 0x22222222u, 0x33333333u},
+                {0x44444444u, makeVifCmd(0x07u, 0u, 0xABCDu), 0u, 0u}
+            };
+            std::memcpy(mem.getRDRAM() + kSource, blocks, sizeof(blocks));
+
+            const auto transmit = [&](uint32_t source)
+            {
+                mem.writeIORegister(kVif1Ch + 0x10u, source);
+                mem.writeIORegister(kVif1Ch + 0x20u, 1u);
+                mem.writeIORegister(kVif1Ch, 0x100u);
+            };
+
+            transmit(kSource);
+            t.Equals(mem.vif1_regs.row[0], 0u, "incomplete STROW should not publish partial register data");
+            t.Equals(mem.vif1_regs.stat & (1u << 11), 0u,
+                     "I-bit should remain clear until the STROW payload completes");
+            t.Equals(mem.readIORegister(kVif1Ch + 0x20u), 0u,
+                     "the first DMA block should be consumed while its command remains pending");
+
+            transmit(kSource + 16u);
+            t.Equals(mem.vif1_regs.row[0], 0x11111111u, "split STROW should preserve row[0]");
+            t.Equals(mem.vif1_regs.row[1], 0x22222222u, "split STROW should preserve row[1]");
+            t.Equals(mem.vif1_regs.row[2], 0x33333333u, "split STROW should preserve row[2]");
+            t.Equals(mem.vif1_regs.row[3], 0x44444444u, "split STROW should preserve row[3]");
+            t.Equals(mem.vif1_regs.stat & (1u << 11), 1u << 11,
+                     "I-bit should assert after the STROW payload completes");
+            t.Equals(mem.vif1_regs.mark, 0xABCDu, "the command after split STROW should execute");
+        });
+
+        tc.Run("VIF1 MPG resumes atomically across input fragments", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "split MPG fixture should initialize");
+            std::memset(mem.getVU1Code(), 0xCD, PS2_VU1_CODE_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x4Au, 2u, 0x07FFu) | 0x80000000u);
+            for (uint32_t i = 0u; i < 16u; ++i)
+                packet.push_back(static_cast<uint8_t>(0x40u + i));
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0x1234u));
+
+            mem.processVIF1Data(packet.data(), 12u);
+            const uint8_t *code = mem.getVU1Code();
+            t.Equals(static_cast<uint32_t>(code[PS2_VU1_CODE_SIZE - 1u]), 0xCDu,
+                     "incomplete MPG should not publish its first fragment");
+            t.Equals(static_cast<uint32_t>(code[0]), 0xCDu,
+                     "incomplete wrapping MPG should leave the start untouched");
+            t.Equals(mem.vif1_regs.stat & (1u << 11), 0u,
+                     "I-bit should remain clear while MPG is incomplete");
+
+            mem.processVIF1Data(packet.data() + 12u, static_cast<uint32_t>(packet.size()) - 12u);
+            bool wrapped = true;
+            for (uint32_t i = 0u; i < 8u; ++i)
+            {
+                wrapped &= code[PS2_VU1_CODE_SIZE - 8u + i] == static_cast<uint8_t>(0x40u + i);
+                wrapped &= code[i] == static_cast<uint8_t>(0x48u + i);
+            }
+            t.IsTrue(wrapped, "completed MPG should atomically wrap through VU1 micro memory");
+            t.Equals(mem.vif1_regs.stat & (1u << 11), 1u << 11,
+                     "I-bit should assert after MPG completes");
+            t.Equals(mem.vif1_regs.mark, 0x1234u, "the command after split MPG should execute");
+        });
+
+        tc.Run("VIF1 UNPACK resumes atomically across input fragments", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "split UNPACK fixture should initialize");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x6Cu, 2u, 3u) | 0x80000000u);
+            for (uint32_t i = 0u; i < 8u; ++i)
+                appendU32(packet, 0x10000000u + i);
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0x5678u));
+
+            mem.processVIF1Data(packet.data(), 20u);
+            uint32_t first = 0xFFFFFFFFu;
+            std::memcpy(&first, mem.getVU1Data() + 3u * 16u, sizeof(first));
+            t.Equals(first, 0u, "incomplete UNPACK should not publish a partial vector");
+            t.Equals(mem.vif1_regs.stat & (1u << 11), 0u,
+                     "I-bit should remain clear while UNPACK is incomplete");
+
+            mem.processVIF1Data(packet.data() + 20u, static_cast<uint32_t>(packet.size()) - 20u);
+            bool unpacked = true;
+            for (uint32_t i = 0u; i < 8u; ++i)
+            {
+                uint32_t value = 0u;
+                std::memcpy(&value, mem.getVU1Data() + 3u * 16u + i * 4u, sizeof(value));
+                unpacked &= value == 0x10000000u + i;
+            }
+            t.IsTrue(unpacked, "completed UNPACK should preserve both vectors");
+            t.Equals(mem.vif1_regs.stat & (1u << 11), 1u << 11,
+                     "I-bit should assert after UNPACK completes");
+            t.Equals(mem.vif1_regs.mark, 0x5678u, "the command after split UNPACK should execute");
+        });
+
+        tc.Run("VIF1 DIRECT resumes inside a GIF quadword", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "split DIRECT fixture should initialize");
+
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.emplace_back(data, data + sizeBytes);
+            });
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x50u, 0u, 1u) | 0x80000000u);
+            for (uint32_t i = 0u; i < 16u; ++i)
+                packet.push_back(static_cast<uint8_t>(0x80u + i));
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0x9ABCu));
+
+            mem.processVIF1Data(packet.data(), 11u);
+            t.Equals(captured.size(), static_cast<size_t>(0u),
+                     "incomplete DIRECT should not submit a partial GIF packet");
+            t.Equals(mem.vif1_regs.stat & (1u << 11), 0u,
+                     "I-bit should remain clear while DIRECT is incomplete");
+
+            mem.processVIF1Data(packet.data() + 11u, static_cast<uint32_t>(packet.size()) - 11u);
+            t.Equals(captured.size(), static_cast<size_t>(1u),
+                     "completed DIRECT should submit exactly one GIF packet");
+            if (captured.size() == 1u)
+            {
+                t.Equals(captured[0].size(), static_cast<size_t>(16u),
+                         "completed DIRECT should preserve its declared size");
+                bool payloadMatches = captured[0].size() == 16u;
+                for (uint32_t i = 0u; payloadMatches && i < 16u; ++i)
+                    payloadMatches &= captured[0][i] == static_cast<uint8_t>(0x80u + i);
+                t.IsTrue(payloadMatches, "completed DIRECT should preserve bytes across the fragment");
+            }
+            t.Equals(mem.vif1_regs.stat & (1u << 11), 1u << 11,
+                     "I-bit should assert after DIRECT completes");
+            t.Equals(mem.vif1_regs.mark, 0x9ABCu, "the command after split DIRECT should execute");
+        });
+
+        tc.Run("VIF1 retains partial command bytes and reset cancels pending data", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "partial command fixture should initialize");
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x20u, 0u, 0u));
+            appendU32(packet, 0x89ABCDEFu);
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0x2468u));
+            mem.processVIF1Data(packet.data(), 2u);
+            mem.processVIF1Data(packet.data() + 2u, static_cast<uint32_t>(packet.size()) - 2u);
+            t.Equals(mem.vif1_regs.mask, 0x89ABCDEFu, "split VIFcode bytes should retain the STMASK command");
+            t.Equals(mem.vif1_regs.mark, 0x2468u, "decoding should resume after the split VIFcode");
+
+            std::memset(mem.getVU1Code(), 0xCD, PS2_VU1_CODE_SIZE);
+            packet.clear();
+            appendU32(packet, makeVifCmd(0x4Au, 2u, 0u) | 0x80000000u);
+            packet.resize(packet.size() + 8u, 0x55u);
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+            t.IsTrue(mem.writeIORegister(0x10003C10u, 1u), "VIF1 FBRST reset should succeed");
+
+            const uint32_t mark = makeVifCmd(0x07u, 0u, 0x1357u);
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&mark), sizeof(mark));
+            t.Equals(mem.vif1_regs.mark, 0x1357u, "reset should discard the stale MPG fragment");
+            t.Equals(static_cast<uint32_t>(mem.getVU1Code()[0]), 0xCDu,
+                     "cancelled MPG should leave VU1 micro memory untouched");
+            t.Equals(mem.vif1_regs.stat & (1u << 11), 0u,
+                     "reset should discard the pending command's I-bit");
+        });
+
         tc.Run("VIF UNPACK num zero uploads 256 vectors", [](TestCase &t)
         {
             PS2Memory mem;
