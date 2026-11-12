@@ -36,6 +36,15 @@ namespace
 {
     constexpr uint8_t kGifFmtImage = 2u;
 
+    void uploadMicroMemory(uint8_t *micro, uint32_t microSize, uint32_t address,
+                           const uint8_t *data, uint32_t size)
+    {
+        const uint32_t firstSize = std::min(size, microSize - address);
+        std::memcpy(micro + address, data, firstSize);
+        if (firstSize < size)
+            std::memcpy(micro, data + firstSize, size - firstSize);
+    }
+
     // PS2X_VIF1_DUMP=<dir>: writes every VIF1 buffer (the bytes processVIF1Data gets: a whole DMA chain with its TTE
     // VIFcodes, or a normal-mode block) as vif1_NNNNN.bin, starting PS2X_VIF1_DUMP_AFTER seconds after the first
     // VIF1 transfer, at most PS2X_VIF1_DUMP_MAX (default 400) buffers. With the first one it also writes the VU1
@@ -707,25 +716,19 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_MPG)
         {
-            const uint32_t destAddr = static_cast<uint32_t>(imm & 0x1FFu) * 8u;
+            const uint32_t destAddr =
+                (static_cast<uint32_t>(imm) * 8u) & (PS2_VU0_CODE_SIZE - 1u);
             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             const uint32_t mpgBytes = instructionCount * 8u;
-            uint32_t copyBytes = 0u;
-            if (m_vu0Code && destAddr < PS2_VU0_CODE_SIZE && mpgBytes > 0u)
-            {
-                copyBytes = mpgBytes;
-                if (destAddr + copyBytes > PS2_VU0_CODE_SIZE)
-                    copyBytes = PS2_VU0_CODE_SIZE - destAddr;
-                if (pos + copyBytes <= sizeBytes)
-                {
-                    std::memcpy(m_vu0Code + destAddr, data + pos, copyBytes);
-                    markVU0CodeModified();
-                }
-            }
-
-            pos += mpgBytes;
-            if (pos > sizeBytes)
+            if (sizeBytes - pos < mpgBytes)
                 break;
+
+            if (m_vu0Code)
+            {
+                uploadMicroMemory(m_vu0Code, PS2_VU0_CODE_SIZE, destAddr, data + pos, mpgBytes);
+                markVU0CodeModified();
+            }
+            pos += mpgBytes;
             continue;
         }
         else if ((opcode & 0x60u) == 0x60u)
