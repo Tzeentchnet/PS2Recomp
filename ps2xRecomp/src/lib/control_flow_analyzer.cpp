@@ -192,7 +192,7 @@ namespace ps2recomp
             bool needsIndirectFallback = false;
             for (const Instruction *jrInst : indirectJumps)
             {
-                if (jrInst->function == SPECIAL_JALR)
+                if (jrInst->function == SPECIAL_JALR && jrInst->rd != 0u)
                 {
                     // An indirect *call*: the target is another function, entered through the runtime dispatcher.
                     // Only the return address needs a resume label. Treating it like an unresolved local jump made
