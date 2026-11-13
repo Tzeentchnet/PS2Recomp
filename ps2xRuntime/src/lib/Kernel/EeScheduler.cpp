@@ -11,6 +11,9 @@
 #include "ps2_runtime_macros.h"
 #include "ps2_cg_dsp.h" // g_ps2DspStat, PS2_TAIL_MARK (includes ps2_cg.h)
 #include "ps2_cg.h" // g_ps2EeBudget: the guest code's checkpoint budget (the dispatch loop charges through it as well)
+#if defined(PS2X_ENABLE_EE_DISPATCH_PROFILE)
+#include "runtime/ee_dispatch_profile.h"
+#endif
 
 #include <algorithm>
 #include <string_view>
@@ -839,6 +842,10 @@ void EeScheduler::run()
             }
             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
             m_guestExecuting.store(true, std::memory_order_release);
+#if defined(PS2X_ENABLE_EE_DISPATCH_PROFILE)
+            ps2x::ee_profile::ScopedCall profileSample(ps2x::ee_profile::CallKind::Outer,
+                                                       context.pc, context.pc);
+#endif
             schedTrace('E', running->id, running->invocations.size(), context);
             g_ps2GuestUnwinding = false;
             function(m_rdram, &context, &m_runtime);
@@ -886,6 +893,9 @@ void EeScheduler::run()
         }
     }
 
+#if defined(PS2X_ENABLE_EE_DISPATCH_PROFILE)
+    ps2x::ee_profile::finish(m_vsyncTick);
+#endif
     m_guestExecuting.store(false, std::memory_order_release);
     m_running.store(false, std::memory_order_release);
     copyMainContextToRuntime();
@@ -2542,6 +2552,9 @@ void EeScheduler::processEvent(const EeEvent &event)
     case EeEventType::VBlankStart:
         ++m_vsyncTick;
         ps2tl::rec(ps2tl::VBLANK, static_cast<uint32_t>(m_vsyncTick), 0u, static_cast<uint32_t>(m_eeCycle));
+#if defined(PS2X_ENABLE_EE_DISPATCH_PROFILE)
+        ps2x::ee_profile::onField(m_vsyncTick);
+#endif
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
         if ((m_vsyncTick & 1u) != 0u)
         {
