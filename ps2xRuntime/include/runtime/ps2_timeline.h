@@ -51,6 +51,16 @@ namespace ps2tl
     X(GS_VSYNC_B, LaneGS)        /* GSvsync (render + present of one frame) */                                       \
     X(GS_VSYNC_E, LaneGS)                                                                                            \
     X(GS_QUEUED, LaneWorker)     /* frames queued in kzgs after this vsync was pushed */                            \
+    X(GS_UPLOAD_DRAW, LaneGS)     /* a = accumulated GIF upload/draw CPU time for the frame (us) */                  \
+    X(GPU_FRAME, LaneGS)          /* a = whole-frame GPU execution time (us) */                                      \
+    X(GS_MERGE_B, LaneGS)                                                                                            \
+    X(GS_MERGE_E, LaneGS)                                                                                            \
+    X(GS_UPSCALE_B, LaneGS)                                                                                          \
+    X(GS_UPSCALE_E, LaneGS)                                                                                          \
+    X(GS_SHARPEN_B, LaneGS)                                                                                          \
+    X(GS_SHARPEN_E, LaneGS)                                                                                          \
+    X(GS_PRESENT_B, LaneGS)                                                                                          \
+    X(GS_PRESENT_E, LaneGS)                                                                                          \
     X(IOP_B, LaneOther)                                                                                              \
     X(IOP_E, LaneOther)
 
