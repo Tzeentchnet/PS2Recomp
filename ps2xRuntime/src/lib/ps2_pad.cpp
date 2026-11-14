@@ -30,11 +30,23 @@ namespace
 namespace
 {
     std::atomic<PS2PadProvider> g_padProvider{nullptr};
+    std::atomic<PS2PadRumbleProvider> g_padRumbleProvider{nullptr};
 }
 
 void ps2SetPadProvider(PS2PadProvider provider)
 {
     g_padProvider.store(provider, std::memory_order_release);
+}
+
+void ps2SetPadRumbleProvider(PS2PadRumbleProvider provider)
+{
+    g_padRumbleProvider.store(provider, std::memory_order_release);
+}
+
+void ps2SubmitPadRumble(int port, int slot, uint8_t smallMotor, uint8_t largeMotor)
+{
+    if (PS2PadRumbleProvider provider = g_padRumbleProvider.load(std::memory_order_acquire))
+        provider(port, slot, smallMotor, largeMotor);
 }
 
 bool PSPadBackend::readState(int port, int slot, uint8_t *data, size_t size)

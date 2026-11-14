@@ -2,15 +2,19 @@
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "Stubs/Pad.h"
+#include "runtime/ps2_pad_provider.h"
 
 #include <vector>
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 
 namespace
 {
     constexpr uint32_t kPadDataAddr = 0x1000;
+    constexpr uint32_t kActAlignAddr = 0x1300;
+    constexpr uint32_t kActDirectAddr = 0x1310;
 
     constexpr uint16_t kPadBtnSelect = 1u << 0;
     constexpr uint16_t kPadBtnL3 = 1u << 1;
@@ -28,6 +32,26 @@ namespace
     constexpr uint16_t kPadBtnCircle = 1u << 13;
     constexpr uint16_t kPadBtnCross = 1u << 14;
     constexpr uint16_t kPadBtnSquare = 1u << 15;
+
+    struct RumbleCapture
+    {
+        int calls = 0;
+        int port = -1;
+        int slot = -1;
+        uint8_t smallMotor = 0;
+        uint8_t largeMotor = 0;
+    };
+
+    RumbleCapture g_rumbleCapture;
+
+    void captureRumble(int port, int slot, uint8_t smallMotor, uint8_t largeMotor)
+    {
+        ++g_rumbleCapture.calls;
+        g_rumbleCapture.port = port;
+        g_rumbleCapture.slot = slot;
+        g_rumbleCapture.smallMotor = smallMotor;
+        g_rumbleCapture.largeMotor = largeMotor;
+    }
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -361,14 +385,21 @@ void register_pad_input_tests()
 
             ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
             openPadPort(ctx, rdram);
+            uint8_t *alignment = rdram.data() + kActAlignAddr;
+            alignment[0] = 0u;
+            alignment[1] = 1u;
+            alignment[2] = alignment[3] = alignment[4] = alignment[5] = 0xFFu;
+            std::memset(rdram.data() + kActDirectAddr, 0, 6);
 
             setRegU32(ctx, 4, 0u);
             setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, kActAlignAddr);
             ps2_stubs::scePadSetActAlign(rdram.data(), &ctx, nullptr);
             t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "scePadSetActAlign should succeed");
 
             setRegU32(ctx, 4, 0u);
             setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, kActDirectAddr);
             ps2_stubs::scePadSetActDirect(rdram.data(), &ctx, nullptr);
             t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "scePadSetActDirect should succeed");
 
@@ -415,6 +446,68 @@ void register_pad_input_tests()
             t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "scePadExitPressMode should succeed");
 
             closePadPort(ctx, rdram);
+        });
+
+        tc.Run("pad actuator alignment reaches the host rumble provider", [](TestCase &t)
+               {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+            g_rumbleCapture = {};
+            ps2SetPadRumbleProvider(&captureRumble);
+
+            uint8_t *alignment = rdram.data() + kActAlignAddr;
+            alignment[0] = 0xFFu;
+            alignment[1] = 1u;
+            alignment[2] = 0u;
+            alignment[3] = alignment[4] = alignment[5] = 0xFFu;
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, kActAlignAddr);
+            ps2_stubs::scePadSetActAlign(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "custom actuator alignment should succeed");
+
+            uint8_t *direct = rdram.data() + kActDirectAddr;
+            direct[0] = 0xFFu;
+            direct[1] = 0x80u;
+            direct[2] = 0x01u;
+            direct[3] = direct[4] = direct[5] = 0u;
+            setRegU32(ctx, 6, kActDirectAddr);
+            ps2_stubs::scePadSetActDirect(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "actuator command should succeed");
+            t.Equals(g_rumbleCapture.calls, 1, "actuator command should be forwarded once");
+            t.Equals(g_rumbleCapture.port, 0, "rumble should retain the pad port");
+            t.Equals(g_rumbleCapture.slot, 0, "rumble should retain the pad slot");
+            t.Equals(g_rumbleCapture.smallMotor, static_cast<uint8_t>(1), "aligned small motor should be digital");
+            t.Equals(g_rumbleCapture.largeMotor, static_cast<uint8_t>(0x80), "aligned large motor should retain its magnitude");
+
+            std::memset(alignment, 0xFF, 6);
+            setRegU32(ctx, 6, kActAlignAddr);
+            ps2_stubs::scePadSetActAlign(rdram.data(), &ctx, nullptr);
+            setRegU32(ctx, 6, kActDirectAddr);
+            ps2_stubs::scePadSetActDirect(rdram.data(), &ctx, nullptr);
+            t.Equals(g_rumbleCapture.smallMotor, static_cast<uint8_t>(0), "unmapped small motor should stop");
+            t.Equals(g_rumbleCapture.largeMotor, static_cast<uint8_t>(0), "unmapped large motor should stop");
+
+            const int callsBeforeInvalid = g_rumbleCapture.calls;
+            setRegU32(ctx, 6, 0u);
+            ps2_stubs::scePadSetActDirect(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(0), "null actuator data should fail");
+            t.Equals(g_rumbleCapture.calls, callsBeforeInvalid, "invalid actuator data should not reach the host");
+
+            setRegU32(ctx, 4, 2u);
+            setRegU32(ctx, 6, kActDirectAddr);
+            ps2_stubs::scePadSetActDirect(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(0), "invalid actuator port should fail");
+            t.Equals(g_rumbleCapture.calls, callsBeforeInvalid, "invalid actuator port should not reach the host");
+
+            closePadPort(ctx, rdram);
+            t.Equals(g_rumbleCapture.calls, callsBeforeInvalid + 1, "closing a pad should send a stop command");
+            t.Equals(g_rumbleCapture.smallMotor, static_cast<uint8_t>(0), "pad close should stop the small motor");
+            t.Equals(g_rumbleCapture.largeMotor, static_cast<uint8_t>(0), "pad close should stop the large motor");
+            ps2SetPadRumbleProvider(nullptr);
         });
 
         tc.Run("scePadRead fills pressure bytes and honors button info mask", [](TestCase &t)

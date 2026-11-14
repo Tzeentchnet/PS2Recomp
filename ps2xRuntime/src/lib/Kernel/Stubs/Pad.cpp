@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "Pad.h"
+#include "runtime/ps2_pad_provider.h"
 
 namespace ps2_stubs
 {
@@ -56,6 +57,7 @@ namespace ps2_stubs
             uint32_t transientState = 0u;
             PadInputState lastInput{};
             uint8_t lastData[32]{};
+            uint8_t actuatorAlign[6]{0u, 1u, 0xFFu, 0xFFu, 0xFFu, 0xFFu};
             uint32_t readCount = 0u;
             uint32_t lastReadDataAddr = 0u;
         };
@@ -213,6 +215,27 @@ namespace ps2_stubs
             return &g_padPorts[port];
         }
 
+        bool readGuestBytes(const uint8_t *rdram, uint32_t addr, uint8_t *data, size_t size)
+        {
+            if (addr == 0u)
+                return false;
+
+            for (size_t i = 0; i < size; ++i)
+            {
+                const uint8_t *guestByte = getConstMemPtr(rdram, addr + static_cast<uint32_t>(i));
+                if (!guestByte)
+                    return false;
+                data[i] = *guestByte;
+            }
+            return true;
+        }
+
+        void stopAllPadRumble()
+        {
+            for (int port = 0; port < static_cast<int>(kPadPortCount); ++port)
+                ps2SubmitPadRumble(port, 0, 0u, 0u);
+        }
+
         void initializePadPortLocked(PadPortState &portState, uint32_t dmaAddr)
         {
             portState.open = true;
@@ -349,6 +372,7 @@ namespace ps2_stubs
             std::lock_guard<std::mutex> lock(g_padStateMutex);
             resetPadStateLocked();
         }
+        stopAllPadRumble();
         setReturnS32(ctx, 1);
     }
 
@@ -568,6 +592,7 @@ namespace ps2_stubs
             std::lock_guard<std::mutex> lock(g_padStateMutex);
             resetPadStateLocked();
         }
+        stopAllPadRumble();
         setReturnS32(ctx, 1);
     }
 
@@ -580,19 +605,22 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
-        std::lock_guard<std::mutex> lock(g_padStateMutex);
-        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                           static_cast<int>(getRegU32(ctx, 5)));
-        if (!portState)
         {
-            setReturnS32(ctx, 0);
-            return;
-        }
+            std::lock_guard<std::mutex> lock(g_padStateMutex);
+            PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                               static_cast<int>(getRegU32(ctx, 5)));
+            if (!portState)
+            {
+                setReturnS32(ctx, 0);
+                return;
+            }
 
-        portState->open = false;
-        portState->pressureEnabled = false;
-        portState->reqState = 0u;
-        portState->transientState = 0u;
+            portState->open = false;
+            portState->pressureEnabled = false;
+            portState->reqState = 0u;
+            portState->transientState = 0u;
+        }
+        ps2SubmitPadRumble(static_cast<int>(getRegU32(ctx, 4)), static_cast<int>(getRegU32(ctx, 5)), 0u, 0u);
         setReturnS32(ctx, 1);
     }
 
@@ -688,15 +716,61 @@ namespace ps2_stubs
 
     void scePadSetActAlign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)rdram;
         (void)runtime;
+        uint8_t alignment[6]{};
+        if (!readGuestBytes(rdram, getRegU32(ctx, 6), alignment, sizeof(alignment)))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                           static_cast<int>(getRegU32(ctx, 5)));
+        if (!portState || !portState->open)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        std::memcpy(portState->actuatorAlign, alignment, sizeof(alignment));
         setReturnS32(ctx, 1);
     }
 
     void scePadSetActDirect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)rdram;
         (void)runtime;
+        uint8_t direct[6]{};
+        if (!readGuestBytes(rdram, getRegU32(ctx, 6), direct, sizeof(direct)))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        uint8_t alignment[6]{};
+        const int port = static_cast<int>(getRegU32(ctx, 4));
+        const int slot = static_cast<int>(getRegU32(ctx, 5));
+        {
+            std::lock_guard<std::mutex> lock(g_padStateMutex);
+            PadPortState *portState = lookupPadPortStateLocked(port, slot);
+            if (!portState || !portState->open)
+            {
+                setReturnS32(ctx, 0);
+                return;
+            }
+            std::memcpy(alignment, portState->actuatorAlign, sizeof(alignment));
+        }
+
+        uint8_t smallMotor = 0u;
+        uint8_t largeMotor = 0u;
+        for (size_t i = 0; i < sizeof(alignment); ++i)
+        {
+            if (alignment[i] == 0u)
+                smallMotor = direct[i] != 0u ? 1u : 0u;
+            else if (alignment[i] == 1u)
+                largeMotor = direct[i];
+        }
+        ps2SubmitPadRumble(port, slot, smallMotor, largeMotor);
         setReturnS32(ctx, 1);
     }
 
