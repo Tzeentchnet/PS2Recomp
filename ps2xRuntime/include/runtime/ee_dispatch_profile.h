@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <utility>
 #include <vector>
 #endif
@@ -131,12 +132,13 @@ inline void emit(State &s, uint64_t field)
     const double cpuMsPerField = validCpu
         ? double(cpuNow - s.cpuAtFirstFieldNs) / (1000000.0 * double(field - s.firstField))
         : -1.0;
-    std::cerr << "[ps2x:ee-profile] fields=" << (field - s.firstField)
-              << " end=" << field
-              << " ee_thread_cpu_ms_per_field=" << cpuMsPerField
-              << " outer_calls=" << s.attempts[0]
-              << " nested_calls=" << s.attempts[1]
-              << " dropped_keys=" << s.measurements.dropped() << '\n';
+    std::ostringstream output;
+    output << "[ps2x:ee-profile] fields=" << (field - s.firstField)
+           << " end=" << field
+           << " ee_thread_cpu_ms_per_field=" << cpuMsPerField
+           << " outer_calls=" << s.attempts[0]
+           << " nested_calls=" << s.attempts[1]
+           << " dropped_keys=" << s.measurements.dropped() << '\n';
 
     std::vector<std::pair<CallKey, CallTotals>> ranked(
         s.measurements.rows().begin(), s.measurements.rows().end());
@@ -151,14 +153,15 @@ inline void emit(State &s, uint64_t field)
         const size_t index = static_cast<size_t>(key.kind);
         if (printed[index]++ >= 8u)
             continue;
-        std::cerr << "[ps2x:ee-profile] kind=" << (index == 0u ? "outer" : "nested")
-                  << " caller=0x" << std::hex << key.caller
-                  << " target=0x" << key.target << std::dec
-                  << " samples=" << totals.samples
-                  << " cpu_samples=" << totals.cpuSamples
-                  << " cpu_units=" << totals.cpuUnits
-                  << " wall_ns=" << totals.wallNanoseconds << '\n';
+        output << "[ps2x:ee-profile] kind=" << (index == 0u ? "outer" : "nested")
+               << " caller=0x" << std::hex << key.caller
+               << " target=0x" << key.target << std::dec
+               << " samples=" << totals.samples
+               << " cpu_samples=" << totals.cpuSamples
+               << " cpu_units=" << totals.cpuUnits
+               << " wall_ns=" << totals.wallNanoseconds << '\n';
     }
+    std::cerr << output.str();
     // Inclusive nested and outer samples overlap: never add their totals.
 }
 } // namespace detail
