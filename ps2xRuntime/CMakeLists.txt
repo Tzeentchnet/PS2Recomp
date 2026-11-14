@@ -438,6 +438,7 @@ file(GLOB_RECURSE KERNEL_SRC_FILES CONFIGURE_DEPENDS
 
 if(PS2X_ENABLE_EE_DISPATCH_PROFILE)
     target_compile_definitions(ps2_runtime PRIVATE PS2X_ENABLE_EE_DISPATCH_PROFILE=1)
+    target_sources(ps2_runtime PRIVATE src/lib/ee_dispatch_profile.cpp)
 endif()
 
 target_sources(ps2_runtime PRIVATE
