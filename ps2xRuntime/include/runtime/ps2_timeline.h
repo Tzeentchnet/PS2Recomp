@@ -22,8 +22,9 @@ namespace ps2tl
     // id, lane, name. Pairs are *_B / *_E (begin / end).
 #define PS2TL_EVENTS(X)                                                                                              \
     X(VBLANK, LaneEE)            /* a=vsync tick, b=guest vblank rate flag */                                        \
-    X(SLEEP_B, LaneEE)           /* a=0 pacing sleep in processDueDeadlines, 1 idle wait */                          \
-    X(SLEEP_E, LaneEE)                                                                                               \
+    X(SLEEP_B, LaneEE)           /* a=0 pacing/1 idle; b=remaining us, bit31 precise; c=EE cycle */                  \
+    X(SLEEP_E, LaneEE)           /* b=cause 0 deadline/1 event/2 stop/3 reschedule/4 error, bit31 precise; */         \
+                                 /* c=signed wake-minus-deadline us, or 0 without a deadline */                       \
     X(BARRIER_B, LaneEE)         /* a=Vif1BarrierReason; only logged when the worker was busy */                     \
     X(BARRIER_E, LaneEE)                                                                                             \
     X(APPLY_B, LaneEE)           /* applyCompletions: a=1 scheduler event, 2 barrier, 3 register poll */             \

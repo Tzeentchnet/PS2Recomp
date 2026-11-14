@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -165,6 +166,8 @@ struct EeAlarm
     uint32_t gp = 0;
     uint32_t sp = 0;
 };
+
+class EeHostWait;
 
 struct EeIrqHandler
 {
@@ -392,6 +395,10 @@ private:
     static int waitObjectId(const EeWaitState &wait);
     void writeGuestU32(uint32_t address, uint32_t value);
     void waitForEvent();
+    uint32_t waitForHost(std::unique_lock<std::mutex> &lock,
+                         std::optional<std::chrono::steady_clock::time_point> deadline,
+                         uint32_t kind);
+    void notifyEventWaiter(bool all = false);
     void scheduleEvent(uint64_t deadlineCycle, std::chrono::steady_clock::time_point hostDeadline, EeEvent event);
     void updateNextDeadline();
     [[nodiscard]] bool hasReadyAtOrAbovePriority(int priority) const;
@@ -438,6 +445,8 @@ private:
 
     mutable std::mutex m_eventMutex;
     std::condition_variable m_eventCv;
+    std::unique_ptr<EeHostWait> m_hostWait;
+    std::atomic<uint64_t> m_waitNotificationGeneration{0};
     std::deque<EeEvent> m_events;
     std::vector<ScheduledEvent> m_deadlines;
     std::deque<GuestInvocation> m_pendingInvocations;

@@ -2,12 +2,18 @@
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
 #include "runtime/ee_scheduler.h"
+#include "Kernel/EeHostWait.h"
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <mutex>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -36,6 +42,37 @@ namespace
     };
 
     static_assert(sizeof(Ps2EventFlagInfo) == 28u, "Unexpected Ps2EventFlagInfo layout.");
+
+    class ScopedEnvironmentVariable
+    {
+    public:
+        ScopedEnvironmentVariable(const char *name, const char *value) : m_name(name)
+        {
+            if (const char *oldValue = std::getenv(name))
+                m_oldValue = oldValue;
+#ifdef _WIN32
+            _putenv_s(name, value);
+#else
+            setenv(name, value, 1);
+#endif
+        }
+
+        ~ScopedEnvironmentVariable()
+        {
+#ifdef _WIN32
+            _putenv_s(m_name.c_str(), m_oldValue ? m_oldValue->c_str() : "");
+#else
+            if (m_oldValue)
+                setenv(m_name.c_str(), m_oldValue->c_str(), 1);
+            else
+                unsetenv(m_name.c_str());
+#endif
+        }
+
+    private:
+        std::string m_name;
+        std::optional<std::string> m_oldValue;
+    };
 
     struct TestEnv
     {
@@ -379,6 +416,91 @@ void register_ps2_runtime_interrupt_tests()
 {
     MiniTest::Case("PS2RuntimeInterrupt", [](TestCase &tc)
     {
+        tc.Run("host wait fallback preserves timeout and notification semantics", [](TestCase &t)
+        {
+            EeHostWait hostWait(false);
+            std::mutex mutex;
+            std::condition_variable cv;
+            std::atomic<uint64_t> generation{0};
+            std::unique_lock lock(mutex);
+
+            auto outcome = hostWait.wait(lock, cv, std::chrono::steady_clock::now() + std::chrono::milliseconds(2),
+                                         generation, generation.load(std::memory_order_acquire));
+            t.Equals(outcome.result, EeHostWaitResult::Deadline,
+                     "the fallback wait should report its deadline");
+            t.IsFalse(outcome.precise, "the fallback wait should report the condition-variable backend");
+
+            const uint64_t beforeGeneration = generation.load(std::memory_order_acquire);
+            generation.fetch_add(1u, std::memory_order_release);
+            outcome = hostWait.wait(lock, cv, std::chrono::steady_clock::now() + std::chrono::milliseconds(100),
+                                    generation, beforeGeneration);
+            t.Equals(outcome.result, EeHostWaitResult::Notified,
+                     "a notification published before fallback wait entry must not be lost");
+
+            const uint64_t duringGeneration = generation.load(std::memory_order_acquire);
+            std::thread notifier([&]()
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                generation.fetch_add(1u, std::memory_order_release);
+                cv.notify_one();
+            });
+            outcome = hostWait.wait(lock, cv, std::chrono::steady_clock::now() + std::chrono::milliseconds(250),
+                                    generation, duringGeneration);
+            lock.unlock();
+            notifier.join();
+            t.Equals(outcome.result, EeHostWaitResult::Notified,
+                     "a notification published during fallback wait must interrupt it");
+        });
+
+        tc.Run("precise host wait supports timeout notification and rearm", [](TestCase &t)
+        {
+            EeHostWait hostWait(true);
+#ifdef _WIN32
+            t.IsTrue(hostWait.precise(), "the Windows high-resolution timer and wake event should be available");
+#else
+            t.IsFalse(hostWait.precise(), "non-Windows hosts should use the condition-variable fallback");
+#endif
+            if (!hostWait.precise())
+                return;
+
+            std::mutex mutex;
+            std::condition_variable cv;
+            std::atomic<uint64_t> generation{0};
+            std::unique_lock lock(mutex);
+            for (int attempt = 0; attempt < 2; ++attempt)
+            {
+                const auto outcome =
+                    hostWait.wait(lock, cv, std::chrono::steady_clock::now() + std::chrono::milliseconds(2),
+                                  generation, generation.load(std::memory_order_acquire));
+                t.Equals(outcome.result, EeHostWaitResult::Deadline,
+                         "the precise timer should report each rearmed deadline");
+                t.IsTrue(outcome.precise, "the deadline should use the precise backend");
+            }
+
+            const uint64_t beforeGeneration = generation.load(std::memory_order_acquire);
+            generation.fetch_add(1u, std::memory_order_release);
+            auto outcome =
+                hostWait.wait(lock, cv, std::chrono::steady_clock::now() + std::chrono::milliseconds(100),
+                              generation, beforeGeneration);
+            t.Equals(outcome.result, EeHostWaitResult::Notified,
+                     "a notification published before precise wait entry must not be lost");
+
+            const uint64_t duringGeneration = generation.load(std::memory_order_acquire);
+            std::thread notifier([&]()
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                generation.fetch_add(1u, std::memory_order_release);
+                hostWait.notify();
+            });
+            outcome = hostWait.wait(lock, cv, std::chrono::steady_clock::now() + std::chrono::milliseconds(250),
+                                    generation, duringGeneration);
+            lock.unlock();
+            notifier.join();
+            t.Equals(outcome.result, EeHostWaitResult::Notified,
+                     "a notification published during precise wait must interrupt it");
+            t.IsTrue(outcome.precise, "the notification should use the precise backend");
+        });
+
         tc.Run("negative interrupt-safe EE syscall ids dispatch", [](TestCase &t)
         {
             TestEnv env;
@@ -706,46 +828,51 @@ void register_ps2_runtime_interrupt_tests()
                      "the Timer2 handler should hand the semaphore directly to the waiter");
         });
 
-        tc.Run("scheduler stop wakes an idle VSync wait without a timeout", [](TestCase &t)
+        tc.Run("scheduler stop wakes fallback and precise idle waits", [](TestCase &t)
         {
-            TestEnv env;
-            env.runtime.registerFunction(kIdleVSyncWaitPc, idleVSyncWait);
-
-            R5900Context mainContext{};
-            mainContext.pc = kIdleVSyncWaitPc;
-            std::atomic<bool> schedulerDone{false};
-            std::atomic<bool> schedulerThrew{false};
-            std::thread gameThread([&]()
+            for (const char *precise : {"0", "1"})
             {
-                try
+                ScopedEnvironmentVariable preciseWait("PS2X_PRECISE_WAIT", precise);
+                TestEnv env;
+                env.runtime.registerFunction(kIdleVSyncWaitPc, idleVSyncWait);
+
+                R5900Context mainContext{};
+                mainContext.pc = kIdleVSyncWaitPc;
+                std::atomic<bool> schedulerDone{false};
+                std::atomic<bool> schedulerThrew{false};
+                std::thread gameThread([&]()
                 {
-                    env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
-                    env.runtime.eeScheduler().run();
-                }
-                catch (...)
-                {
-                    schedulerThrew.store(true, std::memory_order_release);
-                }
-                schedulerDone.store(true, std::memory_order_release);
-            });
+                    try
+                    {
+                        env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+                        env.runtime.eeScheduler().run();
+                    }
+                    catch (...)
+                    {
+                        schedulerThrew.store(true, std::memory_order_release);
+                    }
+                    schedulerDone.store(true, std::memory_order_release);
+                });
 
-            const bool becameIdle = waitUntil([&]() {
-                const EeKernelSnapshot snapshot = env.runtime.eeScheduler().snapshot();
-                return snapshot.runningThreadId == 0 &&
-                       !snapshot.threads.empty() &&
-                       snapshot.threads.front().waitReason == EeWaitReason::VSync;
-            }, std::chrono::milliseconds(80));
+                const bool becameIdle = waitUntil([&]() {
+                    const EeKernelSnapshot snapshot = env.runtime.eeScheduler().snapshot();
+                    return snapshot.runningThreadId == 0 &&
+                           !snapshot.threads.empty() &&
+                           snapshot.threads.front().waitReason == EeWaitReason::VSync;
+                }, std::chrono::milliseconds(80));
 
-            env.runtime.requestStop();
-            gameThread.join();
+                env.runtime.requestStop();
+                gameThread.join();
 
-            t.IsTrue(becameIdle, "VSync wait should leave the sole guest thread waiting");
-            t.IsTrue(schedulerDone.load(std::memory_order_acquire),
-                     "requestStop should wake the scheduler's event wait");
-            t.IsFalse(schedulerThrew.load(std::memory_order_acquire),
-                      "the scheduler stop path should not throw");
+                const std::string backend = precise[0] == '1' ? "precise" : "fallback";
+                t.IsTrue(becameIdle, backend + " VSync wait should leave the sole guest thread waiting");
+                t.IsTrue(schedulerDone.load(std::memory_order_acquire),
+                         "requestStop should wake the " + backend + " scheduler event wait");
+                t.IsFalse(schedulerThrew.load(std::memory_order_acquire),
+                          backend + " scheduler stop path should not throw");
 
-            cleanupRuntime(env);
+                cleanupRuntime(env);
+            }
         });
     });
 }
